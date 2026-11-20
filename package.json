@@ -1,0 +1,19 @@
+{
+  "name": "dsh-stock-panel",
+  "version": "0.1.0",
+  "description": "DSH 股票行情面板：大盘指数、自选股、分时和日线、成交明细与资讯。",
+  "license": "MIT",
+  "author": "paulwang123",
+  "repository": { "type": "git", "url": "https://github.com/paulwang123/dsh-stock-panel.git" },
+  "homepage": "https://github.com/paulwang123/dsh-stock-panel#readme",
+  "bugs": { "url": "https://github.com/paulwang123/dsh-stock-panel/issues" },
+  "keywords": ["dsh-plugin", "deepseek-harness", "stock", "a-share", "market"],
+  "files": ["client.js", "cordis.patch.yml", "lib/", "README.md"],
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": { ".": "./lib/index.js", "./client": "./client.js", "./cordis.patch.yml": "./cordis.patch.yml", "./package.json": "./package.json" },
+  "engines": { "node": ">=22.15", "dsh": ">=0.2.2-rc.1 <0.3.0-0" },
+  "meta": { "title": "股票面板", "description": "A股指数、自选股走势与成交量" },
+  "scripts": { "test": "node --test test/*.test.cjs" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "platform": "web", "immediately": true, "inject": ["@deepseek-ai/dsh-client-ui-renderer"] } }
+}
