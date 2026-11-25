@@ -64,7 +64,7 @@ test('routes validate input, report upstream failures and dispose', async () => 
   const body = await res.json(); assert.equal(body.quotes.length, 1); assert.equal(body.errors.length, 1)
   const chart = routes.get('/api/stock-panel/chart')
   assert.equal((await chart(new Request('http://localhost/api/stock-panel/chart?symbol=sh600000&period=other'))).status, 400)
-  await dispose(); assert.equal(disposed.length, 5)
+  await dispose(); assert.equal(disposed.length, routes.size)
 })
 
 test('detail maps real-format quote and transactions with fixed URLs', async () => {

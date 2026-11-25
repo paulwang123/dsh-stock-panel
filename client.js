@@ -136,6 +136,103 @@ window.__ModuleLoader__.load({
             return h('li', { key: index }, h('div', { className: 'sp-news-meta' }, h('time', null, displayText(item?.date)), h('span', null, displayText(item?.source))), url ? h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, title) : h('span', { className: 'sp-news-title' }, title))
           })) : !sectionError && h('div', { className: 'sp-news-status' }, `暂无${tabs.find(([key]) => key === tab)[1]}数据`)))
     }
+    // Temporary frontend contracts: units and calculation methods require backend confirmation.
+    function AdvancedAnalytics({ symbol }) {
+      const [state, setState] = useState({ symbol: '', results: {} })
+      const [revision, setRevision] = useState(0)
+      useEffect(() => {
+        const controller = new AbortController()
+        const tasks = [['chips', symbol], ['sh', 'sh000001'], ['sz', 'sz399001']]
+        setState(previous => previous.symbol === symbol ? previous : { symbol, results: {} })
+        tasks.forEach(([key, target]) => {
+          request(key === 'sh' || key === 'sz' ? 'valuation' : key, { symbol: target }, controller.signal).then(data => {
+            if (controller.signal.aborted) return
+            if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('响应格式无效')
+            if (data.symbol && String(data.symbol).toLowerCase() !== target) throw new Error('返回代码与请求不一致')
+            if ((key === 'chips' && !Array.isArray(data.distribution)) || (key === 'flow' && !Array.isArray(data.points))) throw new Error('响应格式无效，接口契约待确认')
+            setState(previous => previous.symbol === symbol ? { ...previous, results: { ...previous.results, [key]: { data } } } : previous)
+          }).catch(error => {
+            if (!controller.signal.aborted) setState(previous => previous.symbol === symbol ? { ...previous, results: { ...previous.results, [key]: { error: String(error?.message || error) } } } : previous)
+          })
+        })
+        return () => controller.abort()
+      }, [symbol, revision])
+      useEffect(() => {
+        let controller = null
+        let timer = null
+        let stopped = false
+        function refreshFlow() {
+          const current = new AbortController()
+          controller = current
+          request('flow', { symbol }, current.signal).then(data => {
+            if (stopped || current.signal.aborted) return
+            if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.points)) throw new Error('资金响应格式无效')
+            if (data.symbol && String(data.symbol).toLowerCase() !== symbol) throw new Error('返回代码与请求不一致')
+            setState(previous => previous.symbol === symbol ? { ...previous, results: { ...previous.results, flow: { data } } } : previous)
+          }).catch(error => {
+            if (stopped || current.signal.aborted) return
+            setState(previous => previous.symbol === symbol ? { ...previous, results: { ...previous.results, flow: { ...previous.results.flow, error: String(error?.message || error) } } } : previous)
+          }).finally(() => { if (!stopped && !current.signal.aborted) timer = setTimeout(refreshFlow, 30000) })
+        }
+        refreshFlow()
+        return () => { stopped = true; clearTimeout(timer); if (controller) controller.abort() }
+      }, [symbol, revision])
+      const results = state.symbol === symbol ? state.results : {}
+      const numeric = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value)) ? Number(value) : null
+      const value = x => numeric(x) === null ? '--' : Number(x).toLocaleString('zh-CN', { maximumFractionDigits: 4 })
+      function section(key, label, render) {
+        const result = results[key]
+        return h('section', { className: 'sp-analytics-card', key }, h('h4', null, label), !result ? h('p', { role: 'status' }, '加载中…') : h(React.Fragment, null, result.error && h('p', { className: 'sp-error', role: 'alert' }, `加载失败：${result.error}${result.data ? '；显示上次成功数据。' : ''}`), result.data && render(result.data)))
+      }
+      function valuation(data) {
+        const fields = [['最新日度 PE', data.value], ['安全线（历史 20% 分位 PE）', data.low], ['中枢线（历史 50% 分位 PE）', data.median], ['警戒线（历史 80% 分位 PE）', data.high]]
+        if (fields.every(([, item]) => numeric(item) === null) && !(Array.isArray(data.points) && data.points.some(item => numeric(item?.value) !== null))) return h('p', null, '暂无估值数据（单位：PE 倍；历史区间及口径待确认）')
+        const available = fields.map(([, item]) => numeric(item)).filter(item => item !== null)
+        const colors = ['#e5edf7', '#40cba8', '#6b9cff', '#f4777d']
+        const points = Array.isArray(data.points) ? data.points : []
+        const history = points.map(item => numeric(item?.value))
+        const chartValues = [...available, ...history.filter(item => item !== null)]
+        const chartMin = Math.min(...chartValues), chartMax = Math.max(...chartValues), chartPad = (chartMax - chartMin) * 0.15 || Math.abs(chartMax) * 0.1 || 1
+        const chartY = item => 12 + (chartMax + chartPad - item) / (chartMax - chartMin + chartPad * 2) * 116
+        const path = history.map((item, i) => item === null ? '' : `${i && history[i - 1] !== null ? 'L' : 'M'}${points.length === 1 ? 150 : 5 + i * 290 / (points.length - 1)},${chartY(item)}`).filter(Boolean).join(' ')
+        return h(React.Fragment, null, h('p', null, `截至：${displayText(data.asOf)}；日度 PE TTM（倍），非实时指数点位；来源：${displayText(data.source)}；样本数：${displayText(data.sampleSize)}；历史区间：${displayText(data.range?.start)} 至 ${displayText(data.range?.end)}。${data.warning ? String(data.warning) : ''}`),
+          h('svg', { className: 'sp-analytics-valuation', viewBox: '0 0 300 140', role: 'img', 'aria-label': '历史 PE 曲线和历史分位水平线，具体数值见下方列表' },
+            fields.map(([label, item], i) => numeric(item) === null ? null : i === 0 ? h('circle', { key: label, cx: 295, cy: chartY(numeric(item)), r: 4, fill: colors[i] }) : h('line', { key: label, x1: 5, x2: 295, y1: chartY(numeric(item)), y2: chartY(numeric(item)), stroke: colors[i], strokeWidth: 2, strokeDasharray: '6 4' })),
+            path && h('path', { d: path, fill: 'none', stroke: '#f2c66d', strokeWidth: 2, vectorEffect: 'non-scaling-stroke' })),
+          h('p', null, history.some(item => item !== null) ? `历史 PE 曲线（倍）：${displayText(points[0]?.time)} 至 ${displayText(points[points.length - 1]?.time)}；上游数据不完整时不计算分位。` : '暂无历史 PE 曲线数据。'),
+          h('dl', null, fields.map(([label, item], i) => h('div', { key: label }, h('dt', null, h('span', { style: { color: colors[i] }, 'aria-hidden': true }, i === 0 ? '● ' : '━ '), label), h('dd', null, numeric(item) === null ? '--' : `${value(item)} 倍`)))))
+      }
+      return h('section', { className: 'sp-analytics', 'aria-label': '高级指标' },
+        h('div', { className: 'sp-analytics-head' }, h('strong', null, `高级指标 · ${symbol}`), h('button', { type: 'button', onClick: () => setRevision(v => v + 1) }, '↻ 刷新指标')),
+        h('p', { className: 'sp-analytics-warning' }, '筹码及资金均为估算；估值线基于历史市场 PE 分位，不是指数点位或收益保证。所有指标仅供参考，不构成投资建议。'),
+        h('div', { className: 'sp-analytics-grid' },
+          section('chips', '筹码分布', data => {
+            const rows = data.distribution.filter(item => item && numeric(item.price) !== null && numeric(item.percentage) !== null && numeric(item.percentage) >= 0)
+            const max = Math.max(0, ...rows.map(item => numeric(item.percentage)))
+            return h(React.Fragment, null, h('p', null, `最新日线日期：${displayText(data.asOf)}；计算时间：${data.computedAt ? new Date(data.computedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '--'}（行情可能缓存15秒，盘中日线未收盘，指标需手动刷新）；样本：${displayText(data.sampleDays)} 个交易日，首日初始化剩余权重：${value(data.initialWeightPercent)}%。方法：${displayText(data.method)}。${displayText(data.warning)} 价格为前复权元，比例为百分数，柱宽相对于最大占比。`), rows.length ? h('div', { className: 'sp-analytics-scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', { scope: 'col' }, '前复权价格（元）'), h('th', { scope: 'col' }, '占比（%）'))), h('tbody', null, rows.map((item, index) => h('tr', { key: index }, h('td', null, value(item.price)), h('td', null, h('span', { className: 'sp-analytics-bar-track', 'aria-hidden': true }, h('span', { className: 'sp-analytics-chip-bar', style: { width: `${max ? numeric(item.percentage) / max * 100 : 0}%` } })), `${value(item.percentage)}%`)))))) : h('p', null, '暂无有效筹码分布数据'))
+          }),
+          section('flow', '主力资金估算', data => {
+            const rows = data.points.filter(item => item && item.time != null && numeric(item.main) !== null)
+            const max = Math.max(0, ...rows.map(item => Math.abs(numeric(item.main))))
+            return h(React.Fragment, null, h('p', null, data.mode === 'daily' ? `分时资金流暂不可用，现显示日线汇总（非分钟数据、非实时）。最新日期：${displayText(data.asOf)}；数值是各日主力净流入估算（元），并非真实资金净进出；来源：${displayText(data.source)}。柱宽相对于最大绝对值。` : `分时数据，截至：${displayText(data.asOf)}（北京时间，Asia/Shanghai）；可能为最近可用日期而非当前交易日，不保证实时。数值为截至对应分钟的累计主力净流入估算（元），并非真实资金净进出；来源：${displayText(data.source)}。柱宽相对于最大绝对值。`), rows.length ? h('div', { className: 'sp-analytics-scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', { scope: 'col' }, '时间（北京时间）'), h('th', { scope: 'col' }, data.mode === 'daily' ? '当日净流入估算（元）' : '累计净流入估算（元）'))), h('tbody', null, rows.map((item, index) => { const n = numeric(item.main); return h('tr', { key: index }, h('td', null, displayText(item.time)), h('td', null, h('span', { className: 'sp-analytics-flow-track', 'aria-hidden': true }, h('span', { style: { left: n < 0 ? `${50 - (max ? Math.abs(n) / max * 50 : 0)}%` : '50%', width: `${max ? Math.abs(n) / max * 50 : 0}%`, background: n < 0 ? '#40cba8' : '#f4777d' } })), value(item.main))) })))) : h('p', null, '暂无有效资金数据'))
+          }), section('sh', '上证市场整体估值（非实时指数点位）', valuation), section('sz', '深证市场估值（来源标记深证成指，不等同于成份股口径；非实时指数点位）', valuation)))
+    }
+    function InsightTabs({ symbol, version }) {
+      const [tab, setTab] = useState('news')
+      const id = useRef(`sp-insights-${Math.random().toString(36).slice(2)}`)
+      const tabs = [['news', '股票资讯'], ['advanced', '高级指标']]
+      return h('section', { className: 'sp-insights' },
+        h('div', { className: 'sp-insights-tabs', role: 'tablist', 'aria-label': '股票资讯和高级指标' }, tabs.map(([key, label], index) => h('button', {
+          key, id: `${id.current}-tab-${key}`, type: 'button', role: 'tab', 'aria-selected': tab === key, 'aria-controls': `${id.current}-panel-${key}`, tabIndex: tab === key ? 0 : -1,
+          className: tab === key ? 'active' : '', onClick: () => setTab(key), onKeyDown: event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+            setTab(tabs[next][0]); document.getElementById(`${id.current}-tab-${tabs[next][0]}`)?.focus()
+          },
+        }, label))),
+        h('div', { id: `${id.current}-panel-${tab}`, role: 'tabpanel', 'aria-labelledby': `${id.current}-tab-${tab}` }, tab === 'news' ? h(StockNews, { symbol, version }) : h(AdvancedAnalytics, { symbol })))
+    }
     // Selection lives for the lifetime of the plugin, independently of watchlist storage.
     let selectedSymbol = 'sh000001'
     const selectionListeners = new Set()
@@ -283,7 +380,7 @@ window.__ModuleLoader__.load({
           h('main', { className: 'sp-detail sp-detail-layout' }, h('div', { className: 'sp-chart-column' }, h('div', { className: 'sp-detail-head' }, h('div', null, h('div', { className: 'sp-detail-name' }, chart?.name || current?.name || selected), h('div', { className: 'sp-code' }, selected, current?.time ? ` · ${new Date(current.time * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}` : '')), h('div', { className: `sp-detail-price ${direction(current?.percent)}` }, h('strong', null, format(current?.price)), h('small', null, `${signed(current?.change)}  ${signed(current?.percent)}${num(current?.percent) === null ? '' : '%'}`))),
             h('div', { className: 'sp-toolbar' }, h('div', { className: 'sp-tabs', role: 'group', 'aria-label': '走势图周期' }, [['minute', '分时'], ['daily', '日线']].map(([value, label]) => h('button', { key: value, type: 'button', className: period === value ? 'active' : '', 'aria-pressed': period === value, onClick: () => setPeriod(value) }, label))), h('span', { className: 'sp-muted' }, '价格 / 成交量')),
             chartLoading ? h('div', { className: 'sp-empty', role: 'status' }, '正在加载走势图…') : chartError ? h('div', { className: 'sp-empty sp-error', role: 'alert' }, `走势图加载失败：${chartError}`) : h(Chart, { points: chart?.points || [] }),
-            h('p', { className: 'sp-footnote' }, '行情数据仅供参考，不构成投资建议。'), h(StockNews, { symbol: selected, version })), h(MarketDetail, { data: detail?.symbol === selected ? detail.data : null, loading: detailLoading || (detail && detail.symbol !== selected), error: detailError, symbol: selected, watched: watchlist.includes(selected), watchlistFull: new Set([...INDEXES, ...watchlist, selected]).size > 30, onAddWatch: () => addSymbol(selected) }))))
+            h('p', { className: 'sp-footnote' }, '行情数据仅供参考，不构成投资建议。'), h(InsightTabs, { symbol: selected, version })), h(MarketDetail, { data: detail?.symbol === selected ? detail.data : null, loading: detailLoading || (detail && detail.symbol !== selected), error: detailError, symbol: selected, watched: watchlist.includes(selected), watchlistFull: new Set([...INDEXES, ...watchlist, selected]).size > 30, onAddWatch: () => addSymbol(selected) }))))
     }
     const css = `.sp-panel{box-sizing:border-box;background:#101722;color:#e8eef8;border:1px solid #283547;border-radius:16px;padding:24px;max-width:1200px;font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif}.sp-panel *{box-sizing:border-box}.sp-panel button,.sp-panel input{font:inherit}.sp-panel button{cursor:pointer}.sp-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.sp-header h2{margin:4px 0;font-size:24px;color:#f3f6ff}.sp-header p,.sp-footnote{margin:4px 0;color:#8290a6;font-size:12px}.sp-eyebrow{font-size:10px;letter-spacing:.15em;color:#6e9aff;font-weight:700}.sp-refresh,.sp-form button{border:1px solid #365487;background:#233c67;color:#d9e7ff;border-radius:8px;padding:8px 13px}.sp-refresh:disabled{opacity:.55;cursor:wait}.sp-grid{display:grid;grid-template-columns:minmax(220px,290px) minmax(0,1fr);gap:18px}.sp-sidebar,.sp-detail{background:#151f2d;border:1px solid #283649;border-radius:12px;padding:16px;min-width:0}.sp-group-title{font-weight:700;font-size:13px;color:#dbe5f5;margin:2px 0 10px;display:flex;justify-content:space-between}.sp-group-title span,.sp-muted,.sp-code{color:#8493a8;font-size:12px}.sp-watch-title{margin-top:22px}.sp-row{display:flex;align-items:center;border-radius:8px}.sp-row:hover,.sp-selected{background:#202e41}.sp-row-main{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:1;min-width:0;border:0;background:transparent;color:inherit;padding:9px;text-align:left}.sp-name,.sp-values{display:flex;flex-direction:column;gap:4px;min-width:0}.sp-name strong{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sp-name small,.sp-values small{font-size:11px;color:#8493a8}.sp-values{text-align:right;white-space:nowrap}.sp-values strong{font-size:13px}.sp-values.sp-up small,.sp-up{color:#f4777d}.sp-values.sp-down small,.sp-down{color:#40cba8}.sp-flat{color:#d4dfed}.sp-remove{border:0;background:transparent;color:#8090a5;font-size:20px;padding:4px 8px}.sp-remove:hover{color:#f4777d}.sp-form{display:flex;gap:6px;margin-bottom:8px}.sp-form input{width:100%;min-width:0;background:#101824;color:#eef4ff;border:1px solid #34445a;border-radius:8px;padding:8px;font-size:12px}.sp-form button{font-size:12px;white-space:nowrap}.sp-error{color:#ff858a;font-size:12px;overflow-wrap:anywhere;margin:8px 0}.sp-detail-head{display:flex;justify-content:space-between;gap:12px;align-items:start}.sp-detail-name{font-size:20px;font-weight:700}.sp-code{margin-top:5px}.sp-detail-price{display:flex;flex-direction:column;text-align:right;gap:5px}.sp-detail-price strong{font-size:25px}.sp-detail-price small{font-size:12px}.sp-toolbar{display:flex;align-items:center;justify-content:space-between;margin:26px 0 12px}.sp-tabs{display:flex;gap:5px;background:#101824;border-radius:8px;padding:3px}.sp-tabs button{border:0;background:transparent;color:#93a2b7;border-radius:6px;padding:6px 14px;font-size:12px}.sp-tabs button.active{background:#30496d;color:#eef4ff}.sp-chart-wrap{position:relative;padding-left:44px}.sp-chart-wrap svg{display:block;width:100%;height:260px;overflow:visible}.sp-chart-labels{position:absolute;left:0;top:10px;height:150px;display:flex;flex-direction:column;justify-content:space-between;color:#8290a6;font-size:10px}.sp-chart-times{display:flex;justify-content:space-between;color:#8290a6;font-size:10px;margin-top:6px}.sp-empty{display:flex;align-items:center;justify-content:center;min-height:260px;color:#8493a8;font-size:13px;text-align:center;overflow-wrap:anywhere}.sp-empty.sp-error{color:#ff858a}.sp-footnote{margin-top:20px}.sp-panel button:focus-visible,.sp-panel input:focus-visible{outline:2px solid #8baeff;outline-offset:2px}@media(max-width:700px){.sp-panel{padding:14px}.sp-grid{grid-template-columns:1fr}.sp-chart-wrap svg{height:200px}}`
     // Terminal skin stays scoped to the panel so it can live inside the host settings view.
@@ -395,11 +492,13 @@ window.__ModuleLoader__.load({
         content && require('react-dom').createPortal(content, document.body))
     }
     const headerSearchCss = `.sp-header-search{display:flex;min-width:0;width:clamp(110px,16vw,200px);flex:none}.sp-header-search input{box-sizing:border-box;width:100%;min-width:0;padding:5px 8px;border:1px solid #bc747b;border-radius:4px;background:#851a25;color:#fff;font:inherit;font-size:12px}.sp-header-search input::placeholder{color:#ffd7da}.sp-header-search input:focus-visible{outline:2px solid #fff;outline-offset:1px}.sp-header-popup{position:fixed;z-index:2147483000;max-height:min(50vh,320px);overflow:auto;background:#101b29;color:#e5ebf3;border:1px solid #596a80;box-shadow:0 6px 20px #0008;font:13px system-ui,sans-serif}.sp-header-option{display:flex;justify-content:space-between;gap:12px;padding:9px;cursor:pointer}.sp-header-option small{color:#a9b6c7}.sp-header-option:hover,.sp-header-option.active{background:#25364a}.sp-header-status{padding:9px;color:#cbd7e7}.sp-main-search{padding:8px 16px;background:#101927}.sp-main-search .sp-header-search{width:min(320px,100%)}@media(max-width:500px){.sp-header-search{width:100px}.sp-header-search input{font-size:12px}}`
+    const analyticsCss = `.sp-insights{margin-top:16px;min-width:0}.sp-insights-tabs{display:flex;gap:4px;border-bottom:1px solid #263b53}.sp-insights-tabs button{background:transparent;color:#9aabc0;border:0;border-bottom:2px solid transparent;padding:9px 16px;cursor:pointer}.sp-insights-tabs button.active{color:#f5f7fb;border-bottom-color:#e05259}.sp-insights-tabs button:focus-visible{outline:2px solid #f0666e;outline-offset:-2px}.sp-insights .sp-analytics,.sp-insights .sp-news{margin-top:0}.sp-analytics{margin-top:16px;border:1px solid #263b53;background:#0b1726;padding:12px;min-width:0}.sp-analytics-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.sp-analytics-head button{border:1px solid #435670;background:#17283b;color:#cbd9eb;padding:4px 8px;border-radius:3px}.sp-analytics-warning{color:#e7bd73;font-size:12px;line-height:1.5}.sp-analytics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:10px}.sp-analytics-card{min-width:0;border:1px solid #263b53;padding:10px}.sp-analytics-card h4{margin:0 0 8px}.sp-analytics-card p{color:#a9b9cc;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.sp-analytics-card p.sp-error{color:#f4777d}.sp-analytics-scroll{max-height:220px;overflow:auto}.sp-analytics-card table{width:100%;border-collapse:collapse;font-size:12px}.sp-analytics-card th,.sp-analytics-card td{text-align:left;padding:5px;border-bottom:1px solid #263b53}.sp-analytics-card dl{margin:0}.sp-analytics-card dl div{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid #263b53}.sp-analytics-card dd{margin:0;white-space:nowrap}`
+    const analyticsChartCss = `.sp-analytics-bar-track,.sp-analytics-flow-track{display:block;position:relative;width:100%;height:8px;background:#223245;margin:3px 0}.sp-analytics-bar-track span,.sp-analytics-flow-track span{display:block;position:absolute;height:100%}.sp-analytics-chip-bar{background:#6b9cff}.sp-analytics-flow-track:before{content:'';position:absolute;left:50%;height:100%;width:1px;background:#dce4ef}.sp-analytics-valuation{display:block;width:100%;height:140px;background:#0a121d;border:1px solid #263242}`
     const mobileSearchCss = `.sp-header-actions{display:flex;align-items:center;justify-content:flex-end;gap:16px;min-width:0}.sp-header-actions .sp-header-search{width:clamp(150px,17vw,320px)}@container (max-width: 480px){.sp-header-actions{gap:6px}.sp-header-actions .sp-header-search{width:auto}}.sp-mobile-toggle{display:none}@media(max-width:500px){.sp-header-search{width:auto;position:relative}.sp-mobile-toggle{display:block;border:0;background:transparent;color:inherit;cursor:pointer;font-size:20px;padding:4px}.sp-header-search input{display:none}.sp-header-search.sp-mobile-open input{display:block;position:fixed;z-index:2147483001;top:52px;left:8px;width:calc(100vw - 16px);background:#851a25}.sp-header-search.sp-mobile-open .sp-header-popup{top:90px}.sp-main-search .sp-header-search{width:100%}.sp-main-search .sp-mobile-toggle{display:none}.sp-main-search .sp-header-search input{display:block;position:static;width:100%}}`
     function MainPanel() { return h('div', { className: 'sp-main' }, h(StockPanel)) }
     function apply(ctx) {
       layout = ctx.layout
-      ctx.effect(() => { const style = document.createElement('style'); style.textContent = css + terminalCss + integrationCss + hostHeaderCss + headerSearchCss + mobileSearchCss; document.head.appendChild(style); return () => style.remove() }, 'stock-panel styles')
+      ctx.effect(() => { const style = document.createElement('style'); style.textContent = css + terminalCss + integrationCss + hostHeaderCss + headerSearchCss + mobileSearchCss + analyticsCss + analyticsChartCss; document.head.appendChild(style); return () => style.remove() }, 'stock-panel styles')
       ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: 'stock-panel' }, MainPanel))
       ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: 'stock-panel', order: 20, label: () => '股票行情' }, StockIcon))
       ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'stock-panel.dock', order: 50 }, StockDock))
